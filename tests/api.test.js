@@ -352,3 +352,80 @@ test('POST /api/trajectory：目标非法返回 ok:false；方案非法返回 40
   assert.equal(badPlan.status, 400);
   assert.equal(badPlan.json.error.code, 'bad_plan');
 });
+
+// ---------- 生产质量审计 ----------
+test('POST /api/audit：干净折帖返回可发布结论与统计', async () => {
+  const r = await post('/api/audit', {
+    rows: 1, cols: 2,
+    labels: { '0,0': { front: '4', back: '1' }, '1,0': { front: '2', back: '3' } },
+    steps: [{ axis: 'v', line: 1, dir: 'r' }]
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.verdict, 'pass');
+  assert.equal(r.json.summary.total, 0);
+  assert.deepEqual(r.json.findings, []);
+  assert.equal(r.json.stats.capacity, 4);
+  assert.equal(r.json.stats.folded, true);
+  assert.equal(r.json.stats.labeledFaces, 4);
+});
+
+test('POST /api/audit：重复/空白/倒置/未覆盖按严重级别汇总为需修订', async () => {
+  const r = await post('/api/audit', {
+    rows: 2, cols: 2,
+    labels: {
+      '0,0': { front: '1', back: '2' },
+      '1,0': { front: '1', back: '' }
+      // 0,1 / 1,1 整格未覆盖；页码 1 重复；水平折致部分页倒置
+    },
+    steps: STEPS
+  });
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.verdict, 'fail');
+  const ids = new Set(r.json.findings.map((f) => f.id));
+  assert.ok(ids.has('duplicate_page'));
+  assert.ok(ids.has('inverted_page'));
+  assert.ok(ids.has('blank_page'));
+  assert.ok(ids.has('uncovered_cell'));
+  assert.ok(r.json.summary.errors >= 2);
+  assert.equal(r.json.summary.total, r.json.findings.length);
+  const dup = r.json.findings.find((f) => f.id === 'duplicate_page');
+  assert.deepEqual(dup.cells.slice().sort(), ['0,0', '1,0']);
+  assert.ok(r.json.findings.every((f) =>
+    f.severity && f.title && f.message && Array.isArray(f.cells)));
+});
+
+test('POST /api/audit：未收成单叠报分离叠层错误', async () => {
+  const r = await post('/api/audit', {
+    rows: 2, cols: 3, labels: {},
+    steps: [{ axis: 'v', line: 1, dir: 'r' }]
+  });
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.verdict, 'fail');
+  const split = r.json.findings.find((f) => f.id === 'split_stacks');
+  assert.ok(split);
+  assert.equal(split.severity, 'error');
+  assert.equal(split.details.length, 4);
+});
+
+test('POST /api/audit：非法折叠仅报告首个错误，不伪造后续结论', async () => {
+  const r = await post('/api/audit', {
+    rows: 1, cols: 3, labels: {},
+    steps: [
+      { axis: 'v', line: 1, dir: 'r' },
+      { axis: 'v', line: 2, dir: 'l' }
+    ]
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, false);
+  assert.equal(r.json.error.code, 'thickness');
+  assert.equal(r.json.error.stepIndex, 1);
+  assert.deepEqual(r.json.error.conflicts, ['2,0', '1,0']);
+  assert.ok(!('findings' in r.json), '不得附带后续检查结论');
+});
+
+test('POST /api/audit：方案非法返回 400 bad_plan', async () => {
+  const r = await post('/api/audit', { rows: 2, cols: 2, steps: [{ axis: 'z' }] });
+  assert.equal(r.status, 400);
+  assert.equal(r.json.error.code, 'bad_plan');
+});

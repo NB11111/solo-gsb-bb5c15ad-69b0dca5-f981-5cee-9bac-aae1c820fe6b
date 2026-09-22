@@ -19,7 +19,8 @@ const app = {
   imposition: { eligible: null, result: null, sig: null },  // 自动拼版状态
   pathfind: { result: null, sig: null, gridKey: null },      // 折手自动寻路状态
   track: { result: null, gridKey: null, target: null },  // 面片轨迹
-  duplex: { eligible: null, open: false, flip: 'long', result: null, sig: null }  // 双面印刷版
+  duplex: { eligible: null, open: false, flip: 'long', result: null, sig: null },  // 双面印刷版
+  audit: { result: null }                   // 生产质量审计（只读，随方案变化自动重算）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -80,6 +81,8 @@ function init() {
     $('duplexFlip').value = e.target.value;
     renderDuplexPreview();
   });
+
+  $('auditExportBtn').addEventListener('click', exportAudit);
 
   canvas.addEventListener('click', onCanvasClick);
   canvas.addEventListener('mousemove', onCanvasMove);
@@ -218,6 +221,7 @@ function render() {
   renderPathfind();
   renderTrack();
   renderDuplex();
+  renderAudit();
 }
 
 function renderControls() {
@@ -1327,6 +1331,117 @@ function renderPlateSheet(sheetEl, plate, result) {
   sheetEl.parentElement?.appendChild(edge);
 }
 
+// ---------- 生产质量审计 ----------
+/**
+ * 渲染审计卡片：始终对“全部步骤”完整重放（与回放停在第几步无关），
+ * 结果只读；方案含非法步骤时仅报告首个错误，不展示后续检查结论。
+ * 网格、标注或步骤变化后由 render() 自动重算。
+ */
+function renderAudit() {
+  const verdictEl = $('auditVerdict');
+  const status = $('auditStatus');
+  const list = $('auditFindings');
+  const exportBtn = $('auditExportBtn');
+  if (!app.plan.rows) {
+    app.audit.result = null;
+    verdictEl.className = 'audit-verdict idle';
+    verdictEl.textContent = '未审计';
+    status.className = 'hint';
+    status.textContent = '先在左侧创建行列纸格。';
+    list.hidden = true;
+    list.innerHTML = '';
+    exportBtn.disabled = true;
+    return;
+  }
+  const result = E.auditPlan(app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps);
+  app.audit.result = result;
+  exportBtn.disabled = false;
+
+  if (!result.ok) {
+    verdictEl.className = 'audit-verdict blocked';
+    verdictEl.textContent = '⛔ 审计中止';
+    status.className = 'hint audit-status-err';
+    status.textContent = `第 ${result.stepIndex + 1} 步非法（${
+      result.code === 'thickness' ? '厚度不一致' : '折线不在外轮廓'}）：` +
+      '仅报告首个错误，不伪造后续检查结论；修正非法步骤后自动重新审计。';
+    list.hidden = true;
+    list.innerHTML = '';
+    return;
+  }
+
+  const s = result.summary;
+  verdictEl.className = 'audit-verdict ' + (result.verdict === 'pass' ? 'pass' : 'fail');
+  verdictEl.textContent = result.verdict === 'pass' ? '✓ 可发布' : '✗ 需修订';
+  status.className = 'hint ' + (result.verdict === 'pass' ? 'audit-status-ok' : 'audit-status-err');
+  status.textContent =
+    `完整重放 ${result.stats.steps} 步：错误 ${s.errors} 条、警告 ${s.warnings} 条` +
+    `（容量 ${result.stats.capacity} 面，已标注 ${result.stats.labeledFaces} 面）。` +
+    (result.verdict === 'pass' ? ' 结论：可发布。' : ' 结论：需修订后再交付。');
+
+  list.innerHTML = '';
+  list.hidden = false;
+  if (!result.findings.length) {
+    const li = document.createElement('li');
+    li.className = 'audit-item info';
+    li.innerHTML = '<span class="audit-msg">全部检查通过：未发现空白 / 重复 / 倒置页码、' +
+      '分离叠层、未覆盖纸格或容量异常。</span>';
+    list.appendChild(li);
+    return;
+  }
+  const sevName = { error: '错误', warning: '警告', info: '提示' };
+  for (const f of result.findings) {
+    const li = document.createElement('li');
+    li.className = 'audit-item ' + f.severity;
+    const head = document.createElement('div');
+    head.className = 'audit-head';
+    head.innerHTML = `<span class="sev ${f.severity}">${sevName[f.severity] || f.severity}</span>` +
+      `<span class="audit-title">${escapeHtml(f.title)}</span>`;
+    li.appendChild(head);
+    const msg = document.createElement('div');
+    msg.className = 'audit-msg';
+    msg.textContent = f.message;
+    li.appendChild(msg);
+    if (f.cells && f.cells.length) {
+      const cells = document.createElement('div');
+      cells.className = 'audit-cells';
+      const shown = f.cells.slice(0, 8);
+      for (const c of shown) {
+        const chip = document.createElement('span');
+        chip.className = 'cell-chip';
+        chip.textContent = `原格(${c})`;
+        cells.appendChild(chip);
+      }
+      if (f.cells.length > shown.length) {
+        const more = document.createElement('span');
+        more.className = 'cell-chip';
+        more.textContent = `+${f.cells.length - shown.length}`;
+        cells.appendChild(more);
+      }
+      li.appendChild(cells);
+    }
+    list.appendChild(li);
+  }
+}
+
+/** 导出审计报告 JSON（方案 + 审计结果，只读不改动方案）。 */
+function exportAudit() {
+  const result = app.audit.result;
+  if (!result) return;
+  const report = {
+    name: $('planName').value || '未命名方案',
+    generatedAt: new Date().toISOString(),
+    plan: planPayload(),
+    audit: result
+  };
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `fold-audit-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  $('saveMsg').textContent = '已导出生产质量审计报告 JSON。';
+}
+
 // ---------- 错误提示 ----------
 function showFoldError(err) {
   const box = $('foldError');
@@ -1453,6 +1568,7 @@ if (typeof window !== 'undefined') {
     previewImposition, confirmImposition, closeImposition, renderImposition,
     readImposeInputs, runPathfind, doPathfindSearch, appendPathSolution, renderPathfind,
     renderTrack, refreshTrackCells, jumpTrackPoint, currentTrackInfo,
-    openDuplex, closeDuplex, renderDuplex, renderDuplexPreview
+    openDuplex, closeDuplex, renderDuplex, renderDuplexPreview,
+    renderAudit, exportAudit
   });
 }

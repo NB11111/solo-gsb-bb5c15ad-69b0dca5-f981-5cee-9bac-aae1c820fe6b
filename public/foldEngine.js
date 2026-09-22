@@ -860,6 +860,181 @@ function trackPanel(rows, cols, labels, steps, target) {
   };
 }
 
+/**
+ * 生产质量审计
+ * ------------
+ * 对方案做完整重放（始终重放全部步骤，与界面回放停在第几步无关），随后按
+ * 印刷交付规则检查最终状态，逐条给出严重级别、对应原始纸格与可读说明：
+ *
+ *   duplicate_page     重复页码：同一页码标注在多个面上            —— error
+ *   split_stacks       最终分离叠层：全部折叠后仍未收成单叠        —— error
+ *   inverted_page      倒置页码：阅读序列中倒置 180° 的非空白页    —— error
+ *   capacity_mismatch  折叠后容量异常：叶子/阅读面总数与纸格容量
+ *                      不一致（引擎守恒校验，正常方案不会触发）    —— error
+ *   blank_page         空白页码：阅读序列中的空白槽位              —— warning
+ *   uncovered_cell     未覆盖纸格：正反面皆空白、未承载页码        —— warning
+ *   capacity_multiple  单叠总页数非 4 的倍数（骑马钉交付需确认）   —— warning
+ *
+ * 方案含非法折叠时只报告首个错误（contour/thickness + stepIndex + conflicts），
+ * 不产出任何后续检查结论，避免在未知状态上伪造审计结果。
+ *
+ * 每条 finding：{ id, severity:'error'|'warning'|'info', title, message,
+ *   cells:[原始纸格 id], step:null }（step 预留给可归因到具体步骤的检查；
+ *   当前检查均针对最终状态，非法步骤的步号在 ok:false 的 stepIndex 中给出）。
+ *
+ * @returns
+ *   网格非法   { ok:false, code:'bad_grid', message }
+ *   非法折叠   { ok:false, code:'contour'|'thickness', stepIndex, conflicts, message }
+ *   审计完成   { ok:true, verdict:'pass'|'fail',
+ *               summary:{ errors, warnings, infos, total },
+ *               stats:{ rows, cols, capacity, steps, folded, stacks, leaves,
+ *                       labeledFaces, blankFaces },
+ *               findings:[...] }
+ *   verdict：无 error 级结果为 'pass'（可发布），否则 'fail'（需修订）。
+ */
+function auditPlan(rows, cols, labels, steps) {
+  rows = Number(rows); cols = Number(cols);
+  if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) {
+    return { ok: false, code: 'bad_grid', message: '尚未创建合法的行列纸格（行数、列数都须为正整数）。' };
+  }
+  const list = Array.isArray(steps) ? steps : [];
+  const r = replay(rows, cols, labels || {}, list);
+  if (r.error) {
+    const e = r.error;
+    return {
+      ok: false,
+      code: e.code === 'thickness' ? 'thickness' : 'contour',
+      stepIndex: e.stepIndex,
+      conflicts: e.conflicts,
+      message: `存在非法折叠（第 ${e.stepIndex + 1} 步：${e.message}），` +
+        '审计中止：仅报告首个错误，不伪造后续检查结论。'
+    };
+  }
+
+  const state = r.state;
+  const info = pageSequence(state);
+  const capacity = 2 * rows * cols;
+  const multi = info.stacks.length > 1;
+  const faceName = { front: '正面', back: '反面' };
+  const findings = [];
+  const add = (id, severity, title, message, cells, details) => {
+    findings.push({
+      id, severity, title, message,
+      cells: cells || [],
+      step: null,
+      ...(details ? { details } : {})
+    });
+  };
+
+  // —— 容量守恒：折叠后叶子数与阅读面数必须等于纸格总面数 ——
+  const leaves = info.stacks.reduce((n, g) => n + g.depth, 0);
+  const sequenceLength = info.stacks.reduce((n, g) => n + g.sequence.length, 0);
+  if (leaves !== rows * cols || sequenceLength !== capacity) {
+    add('capacity_mismatch', 'error', '折叠后容量异常',
+      `折叠后共 ${leaves} 片叶子、${sequenceLength} 个阅读面，与纸格容量 ` +
+      `${rows}×${cols} 格 × 2 面 = ${capacity} 不一致（守恒校验失败）。`,
+      []);
+  }
+
+  // —— 最终分离叠层 ——
+  if (multi) {
+    const details = info.stacks.map((g, i) => ({
+      stack: i + 1, cell: g.cell, depth: g.depth,
+      panels: g.leaves.map((l) => l.panelId)
+    }));
+    add('split_stacks', 'error', '最终分离叠层',
+      `全部 ${list.length} 步折叠后仍有 ${info.stacks.length} 个分离叠层，无法作为单一折帖交付：` +
+      details.map((d) => `叠层 ${d.stack} 位于格(${d.cell})、厚 ${d.depth} 片（原格 ${d.panels.join('、')}）`).join('；') + '。',
+      details.flatMap((d) => d.panels),
+      details);
+  } else if (capacity % 4 !== 0) {
+    // —— 骑马钉交付：单叠总页数须为 4 的倍数（如 1×1 未折叠的 2 页）——
+    add('capacity_multiple', 'warning', '容量非 4 的倍数',
+      `单叠共 ${capacity} 页（${info.stacks[0].depth} 片叶子），` +
+      '骑马钉装订通常要求总页数为 4 的倍数，请确认交付规格。',
+      []);
+  }
+
+  // —— 逐槽位检查：重复 / 空白 / 倒置（槽位序 = 封面→封底阅读序）——
+  const occurrences = new Map();   // label -> [{ cell, face, slot, stack }]
+  const blanks = [];
+  const inverted = [];
+  let labeledFaces = 0;
+  info.stacks.forEach((grp, gi) => {
+    const depth = grp.leaves.length;
+    const slots = [];
+    for (let i = 0; i < depth; i++) slots.push({ leaf: grp.leaves[i], part: 'upper' });
+    for (let i = depth - 1; i >= 0; i--) slots.push({ leaf: grp.leaves[i], part: 'lower' });
+    slots.forEach((s, si) => {
+      const view = s.part === 'upper' ? s.leaf.upper : s.leaf.lower;
+      const where = { cell: s.leaf.panelId, face: view.face, slot: si + 1, stack: gi + 1 };
+      if (view.label == null) {
+        blanks.push(where);
+      } else {
+        labeledFaces++;
+        if (!occurrences.has(view.label)) occurrences.set(view.label, []);
+        occurrences.get(view.label).push(where);
+        if (!view.upright) inverted.push({ ...where, label: view.label });
+      }
+    });
+  });
+
+  const slotText = (w) => `阅读序列第 ${w.slot} 槽` + (multi ? `（叠层 ${w.stack}）` : '');
+  for (const [label, occ] of occurrences) {
+    if (occ.length < 2) continue;
+    add('duplicate_page', 'error', '重复页码',
+      `页码 “${label}” 出现 ${occ.length} 次：` +
+      occ.map((w) => `原格(${w.cell})·${faceName[w.face]}（${slotText(w)}）`).join('、') + '。',
+      [...new Set(occ.map((w) => w.cell))],
+      occ);
+  }
+  for (const w of inverted) {
+    add('inverted_page', 'error', '倒置页码',
+      `原格(${w.cell})·${faceName[w.face]} 的页码 “${w.label}” 在${slotText(w)}倒置 180°。`,
+      [w.cell], [w]);
+  }
+  for (const w of blanks) {
+    add('blank_page', 'warning', '空白页码',
+      `${slotText(w)}为空白页（原格(${w.cell})·${faceName[w.face]} 未标注页码）。`,
+      [w.cell], [w]);
+  }
+
+  // —— 未覆盖纸格：正反面皆空白 ——
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const id = key(x, y);
+      const p = state.panels[id];
+      if (p.front === '' && p.back === '') {
+        add('uncovered_cell', 'warning', '未覆盖纸格',
+          `原始纸格 (${id}) 正、反面均为空白，未承载任何页码。`,
+          [id]);
+      }
+    }
+  }
+
+  // 错误在前、警告其次（同级保持规则分组顺序）
+  const rank = { error: 0, warning: 1, info: 2 };
+  findings.sort((a, b) => rank[a.severity] - rank[b.severity]);
+
+  const count = (sev) => findings.filter((f) => f.severity === sev).length;
+  const errors = count('error');
+  return {
+    ok: true,
+    verdict: errors > 0 ? 'fail' : 'pass',
+    summary: { errors, warnings: count('warning'), infos: count('info'), total: findings.length },
+    stats: {
+      rows, cols, capacity,
+      steps: list.length,
+      folded: info.folded,
+      stacks: info.stacks.length,
+      leaves,
+      labeledFaces,
+      blankFaces: blanks.length
+    },
+    findings
+  };
+}
+
 /** 方案校验/规整（载入 JSON 时使用） */
 function normalizePlan(plan) {
   const errors = [];
@@ -911,7 +1086,7 @@ const api = {
   impositionEligibility, autoImpose, impositionOverwrite,
   duplexEligibility, buildDuplexPlates,
   findFoldPath, candidateSteps, stateKey, describeStep,
-  trackPanel
+  trackPanel, auditPlan
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;

@@ -9,6 +9,10 @@
 - **折线不在当前外轮廓上（contour）**：移动纸瓣镜像后越过纸块边缘形成悬空；
 - **两侧厚度不一致（thickness）**：折线两边叠层厚度不等（包折 / 不等厚折法）。
 
+全部折叠完成后还可运行**生产质量审计**：按印刷交付规则检查空白 / 重复页码、
+最终分离叠层、倒置页码、未覆盖纸格与折叠后容量异常，逐条给出严重级别、
+对应原始纸格与可读说明，汇总“可发布 / 需修订”结论，并可导出 JSON 报告。
+
 技术栈：Node.js + Express（服务端），原生 HTML / CSS / Canvas（前端），
 折叠模拟为一份零依赖的纯逻辑引擎，浏览器与服务端共用同一份代码。
 
@@ -65,7 +69,19 @@ docker compose down
 6. **阅读顺序**：右侧“最终阅读顺序”按骑马钉式折帖叶序输出
    封面 → … → 封底的页码序列；倒置页码以红底标出，空白页显示“空白”。
    尚未收成单叠时，会分组列出每个分离叠层的序列。
-7. **自动拼版**：仅当**全部折叠步骤都可合法回放且已收成单叠**时，
+7. **生产质量审计**：右侧“生产质量审计”卡片对方案**完整重放全部步骤**
+   （与回放停在第几步无关）后按印刷交付规则自动检查，结果只读、不改动方案：
+   - 检查项与严重级别：**重复页码**（错误）、**最终分离叠层**（错误）、
+     **倒置页码**（错误）、**折叠后容量异常**（容量守恒校验为错误；
+     单叠总页数非 4 的倍数为警告）、**空白页码**（警告）、
+     **未覆盖纸格**（正反面皆空，警告）；
+   - 每条结果给出严重级别、对应**原始纸格**与可读说明（含阅读序列槽位），
+     卡片顶部汇总“✓ 可发布 / ✗ 需修订”结论（存在错误级结果即需修订）；
+   - 方案含**非法折叠**时审计中止，仅报告首个错误（步骤号、原因与冲突纸格），
+     不伪造后续检查结论；修正后自动重新审计；
+   - “导出 JSON 报告”把方案与审计结果（结论、统计、逐条结果）保存为本地 JSON；
+   - 网格、标注或步骤变化后审计自动重算。
+8. **自动拼版**：仅当**全部折叠步骤都可合法回放且已收成单叠**时，
    右侧“自动拼版”卡片才允许输入**起始页码**与**成品页数**：
    - 系统按最终封面→封底的阅读槽位依次写入连续页码，再反向映射到
      每个原始纸格的正/反面；
@@ -74,7 +90,7 @@ docker compose down
    - “生成预览”**不会改动当前标注**；确认后才批量写入；若现有标注非空，
      确认前会汇总所有将被覆盖/清空的位置（写入前还会二次确认）；
    - 非法折叠、未收成单叠或页数超出容量时，生成按钮禁用并给出具体原因。
-8. **折手自动寻路**：右侧“折手自动寻路”卡片中，指定某个**原始纸格**的
+9. **折手自动寻路**：右侧“折手自动寻路”卡片中，指定某个**原始纸格**的
    **正面或反面**作为最终朝上的封面，点击“搜索最短折法”：
    - 搜索从**当前方案全部步骤合法回放后的末态**出发（与回放停在第几步无关），
      枚举引擎当前允许的折线与方向，按 BFS 求“收成单叠且封面符合指定”的
@@ -89,7 +105,7 @@ docker compose down
      达到时间上限仍未确认时提示“**搜索超限**”；
    - 当前方案含非法折叠、或网格超过 4×4 时，搜索按钮禁用并给出原因；
      搜索本身不改动当前步骤，只有手动“追加”才会写入。
-9. **双面印刷版预览**：右侧“双面印刷版预览”卡片中选择翻面方式，点击“生成双面版预览”：
+10. **双面印刷版预览**：右侧“双面印刷版预览”卡片中选择翻面方式，点击“生成双面版预览”：
    - **长边翻转**（沿纸张竖边左右翻面，常规骑马钉/侧边装订）或
      **短边翻转**（沿纸张横边上下翻面，tumble/台历式翻页）；
    - 系统并排生成**正面版（第 1 印刷面）与背面版（第 2 印刷面）**：
@@ -111,7 +127,7 @@ docker compose down
        纸张 A4（或与纸格比例相近的横向纸）；
      - 应用已内置打印样式：**自动隐藏全部编辑控件，正面版、背面版各占一页**
        （A4 横版），无需在打印对话框中再做隐藏设置。
-10. **保存 / 载入**：
+11. **保存 / 载入**：
    - “保存到服务器”将方案 JSON 存入容器数据卷，可通过“已存方案…”再次载入；
    - “导出 JSON / 导入 JSON”在本地文件与应用之间交换方案。
 
@@ -154,19 +170,20 @@ docker compose down
 ## 目录结构
 
 ```
-server.js              Express 服务：静态托管 + /api/simulate + /api/impose + /api/duplex-plate + /api/find-path + /api/trajectory + 方案持久化
+server.js              Express 服务：静态托管 + /api/simulate + /api/impose + /api/duplex-plate + /api/find-path + /api/trajectory + /api/audit + 方案持久化
 entrypoint.sh          容器启动入口（依赖自检/安装、初始化、启动）
 public/
   index.html           页面结构
-  styles.css           样式（含面片轨迹时间线与双面版打印样式 @media print）
-  foldEngine.js        折叠模拟引擎（浏览器与服务端共用，含面片轨迹 trackPanel）
-  app.js               Canvas 渲染、交互、回放、面片轨迹、存取、双面印刷版预览
+  styles.css           样式（含面片轨迹时间线、审计卡片与双面版打印样式 @media print）
+  foldEngine.js        折叠模拟引擎（浏览器与服务端共用，含面片轨迹 trackPanel、生产质量审计 auditPlan）
+  app.js               Canvas 渲染、交互、回放、面片轨迹、存取、双面印刷版预览、生产质量审计
 tests/engine.test.js   引擎单元测试（node --test）
 tests/imposition.test.js 自动拼版单元测试
 tests/duplex.test.js   双面印刷版（镜像、制版旋转、前置条件）单元测试
 tests/pathfind.test.js 折手自动寻路（BFS、状态键、无解/超限）单元测试
 tests/trajectory.test.js 面片轨迹（身份追踪、层序/朝向、非法步中断、参数校验）单元测试
-tests/api.test.js      /api/impose、/api/find-path、/api/trajectory、/api/simulate 与方案存取的 HTTP 测试
+tests/audit.test.js    生产质量审计（分级结论、空白/重复/倒置/未覆盖/容量、非法步中止）单元测试
+tests/api.test.js      /api/impose、/api/find-path、/api/trajectory、/api/audit、/api/simulate 与方案存取的 HTTP 测试
 tests/ui-smoke.js      前端主流程冒烟（DOM 桩中加载 app.js，直接 `node tests/ui-smoke.js` 运行）
 Dockerfile, docker-compose.yml
 ```
@@ -232,3 +249,16 @@ node tests/ui-smoke.js   # 前端主流程冒烟（DOM 桩，独立运行）
 `interrupted:{stepIndex,code,message,conflicts}` 标明中断原因（`contour` / `thickness`）。
 目标原格越界或面别非法返回 `ok:false`，错误码 `bad_target`；网格非法为 `bad_grid`；
 方案 JSON 非法为 `bad_plan`（HTTP 400）。该接口只读，不改变保存 / 导入格式。
+
+`POST /api/audit`（body 同方案 JSON）对全部步骤完整重放后按印刷交付规则审计，
+返回 `ok:true` 与 `verdict`（`pass` 可发布 / `fail` 需修订，存在 error 级结果即 fail）、
+`summary`（`errors` / `warnings` / `infos` / `total` 各级条数）、
+`stats`（`capacity` 容量、`folded` 是否单叠、`stacks` 叠层数、`leaves` 叶子数、
+`labeledFaces` / `blankFaces` 已标注与空白面数）及 `findings`：每条含
+`id`（`duplicate_page` / `split_stacks` / `inverted_page` / `capacity_mismatch` /
+`blank_page` / `uncovered_cell` / `capacity_multiple`）、`severity`（`error` / `warning`）、
+`title`、`message`（含阅读序列槽位的可读说明）、`cells`（对应原始纸格）与 `step`
+（预留，当前检查均针对最终状态，为 `null`）。
+方案含非法折叠时返回 `ok:false` 与首个错误（`code` / `stepIndex` / `conflicts`），
+不附带任何后续检查结论；网格非法为 `bad_grid`，方案 JSON 非法为 `bad_plan`（HTTP 400）。
+该接口只读，不改动方案与存档。

@@ -18,6 +18,7 @@ function makeEl(id) {
     width: 0, height: 0,
     addEventListener(t, fn) { (listeners[t] = listeners[t] || []).push(fn); },
     dispatch(t, ev = {}) { (listeners[t] || []).forEach((fn) => fn(ev)); },
+    click() {},
     appendChild() {}, append() {}, querySelector() { return makeEl('q'); },
     querySelectorAll() { return []; },
     removeAttribute() {}, setAttribute() {},
@@ -59,7 +60,8 @@ const ids = ['rowsInput', 'colsInput', 'createGridBtn', 'axisSelect', 'lineSelec
   'duplexCard', 'duplexFlip', 'duplexOpenBtn', 'duplexStatus',
   'duplexOverlay', 'duplexFlipOverlay', 'duplexScreenNote', 'duplexPrintBtn',
   'duplexCloseBtn', 'plateFrontMeta', 'plateBackMeta', 'plateFrontSheet',
-  'plateBackSheet'];
+  'plateBackSheet',
+  'auditCard', 'auditVerdict', 'auditStatus', 'auditFindings', 'auditExportBtn'];
 const els = Object.fromEntries(ids.map((id) => [id, makeEl(id)]));
 els.rowsInput.value = '2';
 els.colsInput.value = '2';
@@ -424,5 +426,57 @@ assert.equal(ui.currentTrackInfo(ui.replay.state).cell, '0,0');
 const badTarget = FE.trackPanel(1, 3, {}, [], { cell: '9,9', face: 'front' });
 assert.equal(badTarget.ok, false);
 assert.equal(badTarget.code, 'bad_target');
+
+// ---------- 生产质量审计 ----------
+// 干净 1×2 折帖：全部检查通过，结论可发布，可导出报告
+els.rowsInput.value = '1'; els.colsInput.value = '2';
+els.createGridBtn.dispatch('click');
+ui.plan.labels = { '0,0': { front: '4', back: '1' }, '1,0': { front: '2', back: '3' } };
+ui.requestStep({ axis: 'v', line: 1, dir: 'r' });
+assert.equal(ui.audit.result.ok, true);
+assert.equal(ui.audit.result.verdict, 'pass');
+assert.equal(ui.audit.result.summary.total, 0);
+assert.ok(/可发布/.test(els.auditVerdict.textContent));
+assert.equal(els.auditExportBtn.disabled, false);
+assert.equal(els.auditFindings.hidden, false);
+ui.exportAudit();   // 桩环境（Blob/URL/click 已桩）下不抛错
+assert.ok(/审计报告/.test(els.saveMsg.textContent));
+
+// 重复 + 空白 + 未覆盖 + 倒置：结论需修订，分级结果入列
+els.rowsInput.value = '2'; els.colsInput.value = '2';
+els.createGridBtn.dispatch('click');
+ui.plan.labels = {
+  '0,0': { front: '1', back: '2' },
+  '1,0': { front: '1', back: '' }   // 与 0,0 正面重复；反面空白；0,1 / 1,1 整格未覆盖
+};
+ui.requestStep({ axis: 'v', line: 1, dir: 'r' });
+ui.requestStep({ axis: 'h', line: 1, dir: 'd' });
+assert.equal(ui.audit.result.ok, true);
+assert.equal(ui.audit.result.verdict, 'fail');
+const auditIds = new Set(ui.audit.result.findings.map((f) => f.id));
+assert.ok(auditIds.has('duplicate_page'));
+assert.ok(auditIds.has('blank_page'));
+assert.ok(auditIds.has('uncovered_cell'));
+assert.ok(auditIds.has('inverted_page'));
+assert.ok(/需修订/.test(els.auditVerdict.textContent));
+assert.ok(/错误/.test(els.auditStatus.textContent));
+
+// 非法步骤：审计中止，仅报告首个错误，不展示后续结论
+els.rowsInput.value = '1'; els.colsInput.value = '3';
+els.createGridBtn.dispatch('click');
+ui.plan.steps.push({ axis: 'v', line: 1, dir: 'r' });   // 合法
+ui.plan.steps.push({ axis: 'v', line: 2, dir: 'l' });   // 厚度冲突
+ui.render();
+assert.equal(ui.audit.result.ok, false);
+assert.equal(ui.audit.result.code, 'thickness');
+assert.equal(ui.audit.result.stepIndex, 1);
+assert.ok(/审计中止/.test(els.auditVerdict.textContent));
+assert.ok(/首个错误/.test(els.auditStatus.textContent));
+assert.equal(els.auditFindings.hidden, true, '中止时不展示结论列表');
+
+// 修正非法步骤后自动恢复审计
+ui.plan.steps.pop();
+ui.render();
+assert.equal(ui.audit.result.ok, true);
 
 console.log('前端冒烟流程全部通过');

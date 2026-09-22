@@ -427,6 +427,60 @@ button.fold { flex: 1 1 40%; min-width: 110px; font-weight: 600; }
   border-color: #1f7a45;
 }
 
+/* ---------- 生产质量审计 ---------- */
+.audit-status-err { color: var(--danger); }
+.audit-status-ok { color: var(--ok); }
+#auditExportBtn { margin-left: auto; }
+.audit-verdict {
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.audit-verdict.idle { background: #eef1f5; color: var(--muted); }
+.audit-verdict.pass { background: #e3f6ec; color: var(--ok); }
+.audit-verdict.fail { background: var(--warn-bg); color: var(--danger); }
+.audit-verdict.blocked { background: #fdf0dc; color: #a16207; }
+.audit-findings {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 10px 0 0;
+  border-top: 1px dashed var(--line);
+  max-height: 320px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.audit-item {
+  border: 1px solid var(--line);
+  border-left-width: 4px;
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.audit-item.error { border-left-color: var(--danger); background: #fff8f7; }
+.audit-item.warning { border-left-color: #e8a13c; background: #fffcf4; }
+.audit-item.info { border-left-color: var(--primary); background: #f7faff; }
+.audit-item .audit-head { display: flex; align-items: center; gap: 6px; margin-bottom: 2px; }
+.audit-item .sev { font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 10px; }
+.audit-item .sev.error { background: var(--warn-bg); color: var(--danger); }
+.audit-item .sev.warning { background: #fdf0dc; color: #a16207; }
+.audit-item .sev.info { background: #e3ecfd; color: var(--primary); }
+.audit-item .audit-title { font-weight: 700; color: #102a5c; }
+.audit-item .audit-msg { color: var(--ink); overflow-wrap: anywhere; }
+.audit-item .audit-cells { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px; }
+.audit-item .cell-chip {
+  background: #eef1f5;
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 1100px) {
   .layout { grid-template-columns: 1fr; }
 }
