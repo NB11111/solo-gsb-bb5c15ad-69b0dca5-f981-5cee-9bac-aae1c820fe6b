@@ -19,7 +19,8 @@ const app = {
   imposition: { eligible: null, result: null, sig: null },  // 自动拼版状态
   pathfind: { result: null, sig: null, gridKey: null },      // 折手自动寻路状态
   track: { result: null, gridKey: null, target: null },  // 面片轨迹
-  duplex: { eligible: null, open: false, flip: 'long', result: null, sig: null }  // 双面印刷版
+  duplex: { eligible: null, open: false, flip: 'long', result: null, sig: null },  // 双面印刷版
+  audit: { report: null }               // 生产质量审计（只读，随方案变动即时重算）
 };
 
 const $ = (id) => document.getElementById(id);
@@ -80,6 +81,8 @@ function init() {
     $('duplexFlip').value = e.target.value;
     renderDuplexPreview();
   });
+
+  $('auditExportBtn').addEventListener('click', exportAudit);
 
   canvas.addEventListener('click', onCanvasClick);
   canvas.addEventListener('mousemove', onCanvasMove);
@@ -218,6 +221,7 @@ function render() {
   renderPathfind();
   renderTrack();
   renderDuplex();
+  renderAudit();
 }
 
 function renderControls() {
@@ -1327,6 +1331,139 @@ function renderPlateSheet(sheetEl, plate, result) {
   sheetEl.parentElement?.appendChild(edge);
 }
 
+// ---------- 生产质量审计 ----------
+const AUDIT_SEV_TEXT = { error: '错误', warning: '警告' };
+const AUDIT_CODE_TEXT = {
+  invalid_step: '非法步骤',
+  separated_stacks: '分离叠层',
+  duplicate_page: '重复页码',
+  blank_page: '空白页码',
+  inverted_page: '倒置页码',
+  uncovered_cell: '未覆盖纸格',
+  page_out_of_capacity: '容量异常'
+};
+
+/**
+ * 渲染审计卡片：对当前方案完整重放后按交付规则检查。
+ * 审计只读、只依赖方案几何（网格/标注/步骤），方案变动后由 render() 即时重算。
+ */
+function renderAudit() {
+  const status = $('auditStatus');
+  const list = $('auditFindings');
+  const btn = $('auditExportBtn');
+  if (!app.plan.rows) {
+    app.audit.report = null;
+    status.className = 'hint';
+    status.textContent = '先在左侧创建行列纸格。';
+    $('auditSummary').textContent = '';
+    list.hidden = true;
+    list.innerHTML = '';
+    btn.disabled = true;
+    return;
+  }
+  const report = E.auditPlan(app.plan.rows, app.plan.cols, app.plan.labels, app.plan.steps);
+  app.audit.report = report;
+  btn.disabled = false;
+
+  const s = report.summary;
+  status.className = 'hint ' + (s.verdict === 'publishable' ? 'audit-ok' : 'audit-err');
+  status.textContent =
+    (report.aborted ? '⛔ ' : s.verdict === 'publishable' ? '✅ ' : '🛠 ') + s.message;
+  $('auditSummary').textContent = `错误 ${s.errors} · 警告 ${s.warnings}` +
+    (report.aborted ? ' · 已中止' : ` · 重放 ${report.replayedSteps}/${report.plan.steps} 步`);
+
+  list.innerHTML = '';
+  list.hidden = false;
+  if (!report.findings.length) {
+    const li = document.createElement('li');
+    li.className = 'audit-finding ok';
+    li.textContent = '未发现问题：页码、叠层、朝向、纸格覆盖与容量检查全部通过。';
+    list.appendChild(li);
+    return;
+  }
+  for (const f of report.findings) list.appendChild(auditFindingEl(f));
+}
+
+/** 单条审计结果：严重级别徽标 + 检查项 + 可读说明 + 定位标签。 */
+function auditFindingEl(f) {
+  const li = document.createElement('li');
+  li.className = `audit-finding ${f.severity}`;
+  const head = document.createElement('div');
+  head.className = 'audit-head';
+  const sev = document.createElement('span');
+  sev.className = `audit-sev ${f.severity}`;
+  sev.textContent = AUDIT_SEV_TEXT[f.severity] || f.severity;
+  const code = document.createElement('span');
+  code.className = 'audit-code';
+  code.textContent = AUDIT_CODE_TEXT[f.code] || f.code;
+  head.append(sev, code);
+  li.appendChild(head);
+
+  const msg = document.createElement('div');
+  msg.className = 'audit-msg';
+  msg.textContent = f.message;
+  li.appendChild(msg);
+
+  const tags = auditLocationTags(f);
+  if (tags.length) {
+    const loc = document.createElement('div');
+    loc.className = 'audit-locs';
+    tags.slice(0, 8).forEach((t) => {
+      const tag = document.createElement('span');
+      tag.className = 'audit-loc';
+      tag.textContent = t;
+      loc.appendChild(tag);
+    });
+    if (tags.length > 8) {
+      const more = document.createElement('span');
+      more.className = 'audit-loc';
+      more.textContent = `…等 ${tags.length} 处`;
+      loc.appendChild(more);
+    }
+    li.appendChild(loc);
+  }
+  return li;
+}
+
+/** 各类审计结果的定位标签（原始纸格 / 步骤 / 叠层）。 */
+function auditLocationTags(f) {
+  const faceName = { front: '正面', back: '反面' };
+  if (f.code === 'invalid_step') {
+    const tags = [`第 ${f.stepIndex + 1} 步`];
+    if (f.conflicts && f.conflicts.length) tags.push(...f.conflicts.map((c) => `冲突格(${c})`));
+    return tags;
+  }
+  if (f.code === 'separated_stacks') return f.stacks.map((s) => `格(${s.cell})×${s.depth} 片`);
+  if (f.code === 'uncovered_cell') return f.cells.map((c) => `原格(${c})`);
+  if (f.locations) {
+    return f.locations.map((l) =>
+      `格(${l.cell})·${faceName[l.face] || l.face} 槽${l.slot + 1}` +
+      (l.label != null ? ` “${l.label}”` : ''));
+  }
+  return [];
+}
+
+/** 导出 JSON 审计报告（含方案快照，只读不改方案）。 */
+function exportAudit() {
+  const report = app.audit.report;
+  if (!report) return;
+  const payload = {
+    tool: 'fold-proofing',
+    kind: 'production-audit',
+    name: $('planName').value || '未命名方案',
+    generatedAt: new Date().toISOString(),
+    plan: planPayload(),
+    report
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `fold-audit-${Date.now()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  $('saveMsg').textContent = '已导出生产质量审计 JSON 报告。';
+}
+
 // ---------- 错误提示 ----------
 function showFoldError(err) {
   const box = $('foldError');
@@ -1453,6 +1590,7 @@ if (typeof window !== 'undefined') {
     previewImposition, confirmImposition, closeImposition, renderImposition,
     readImposeInputs, runPathfind, doPathfindSearch, appendPathSolution, renderPathfind,
     renderTrack, refreshTrackCells, jumpTrackPoint, currentTrackInfo,
-    openDuplex, closeDuplex, renderDuplex, renderDuplexPreview
+    openDuplex, closeDuplex, renderDuplex, renderDuplexPreview,
+    renderAudit, exportAudit
   });
 }

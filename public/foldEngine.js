@@ -860,6 +860,210 @@ function trackPanel(rows, cols, labels, steps, target) {
   };
 }
 
+/**
+ * 生产质量审计
+ * ------------
+ * 对当前方案做完整重放，再按印刷交付规则逐项检查，输出只读审计报告。
+ *
+ * 检查项（findings[].code）与严重级别（severity）：
+ *   invalid_step          error    首个非法折叠步骤：只报告该错误并中止审计
+ *                                  （aborted=true），不伪造后续任何交付结论；
+ *   separated_stacks      error    全部步骤合法但末态仍是多个分离叠层，
+ *                                  无法确定唯一阅读顺序；
+ *   duplicate_page        error    同一非空页码出现在多个面上（每个重复页码一条）；
+ *   page_out_of_capacity  error    数字页码超出折帖容量 1..2×rows×cols；
+ *   blank_page            warning  阅读序列中存在空白页码槽位；
+ *   inverted_page         warning  页码折后倒置 180°（需确认制版已做旋转补偿）；
+ *   uncovered_cell        warning  原始纸格正、反面均未标注页码（未被拼版覆盖）。
+ *
+ * 汇总 summary.verdict：存在任一 error 级结果为 'needs_revision'（需修订），
+ * 否则为 'publishable'（可发布，可能带警告）。
+ *
+ * 定位信息：页码类结果给出 locations（原始纸格 cell、面 face、所在叠层 stack
+ * 与该叠阅读序列中的 0 基槽位 slot）；叠层/纸格类结果给出 stacks / cells；
+ * 非法步骤给出 stepIndex、step 与冲突纸格 conflicts。
+ *
+ * 本函数只读：不修改输入，也不依赖任何外部状态。
+ *
+ * @returns 成功
+ *   { ok:true, plan:{rows,cols,steps,capacity}, replayedSteps, aborted,
+ *     findings:[...], summary:{errors,warnings,verdict,message} }
+ *   网格非法 { ok:false, code:'bad_grid', message }
+ */
+function auditPlan(rows, cols, labels, steps) {
+  rows = Number(rows); cols = Number(cols);
+  if (!Number.isInteger(rows) || rows < 1 || !Number.isInteger(cols) || cols < 1) {
+    return { ok: false, code: 'bad_grid', message: '尚未创建合法的行列纸格（行数、列数都须为正整数）。' };
+  }
+  const stepList = Array.isArray(steps) ? steps : [];
+  const capacity = 2 * rows * cols;
+  const findings = [];
+
+  /** 汇总结论：任一 error 级结果即“需修订”，否则“可发布”（可带警告）。 */
+  const finish = (aborted, replayedSteps) => {
+    const errors = findings.filter((f) => f.severity === 'error').length;
+    const warnings = findings.length - errors;
+    const verdict = errors > 0 ? 'needs_revision' : 'publishable';
+    let message;
+    if (aborted) {
+      message = `需修订：第 ${findings[0].stepIndex + 1} 步折叠非法，审计已中止，修复后请重新审计。`;
+    } else if (verdict === 'needs_revision') {
+      message = `需修订：发现 ${errors} 项错误、${warnings} 项警告，暂不具备交付条件。`;
+    } else if (warnings > 0) {
+      message = `可发布：无阻断错误；${warnings} 项警告请人工确认后交付。`;
+    } else {
+      message = '可发布：全部交付检查通过。';
+    }
+    return {
+      ok: true,
+      plan: { rows, cols, steps: stepList.length, capacity },
+      replayedSteps,
+      aborted,
+      findings,
+      summary: { errors, warnings, verdict, message }
+    };
+  };
+
+  // —— 完整重放：首个非法步骤即报告并中止，不伪造后续交付结论 ——
+  let state = initialState(rows, cols, labels || {});
+  let replayed = 0;
+  for (let i = 0; i < stepList.length; i++) {
+    const err = validateFold(state, stepList[i]);
+    if (err) {
+      const st = stepList[i] || {};
+      findings.push({
+        code: 'invalid_step',
+        severity: 'error',
+        stepIndex: i,
+        step: { axis: st.axis, line: st.line, dir: st.dir },
+        foldCode: err.code,
+        conflicts: err.conflicts.slice(),
+        message: `第 ${i + 1} 步折叠非法：${err.message}。审计在此中止，其后的交付检查未执行。`
+      });
+      return finish(true, replayed);
+    }
+    state = applyFold(state, stepList[i]);
+    replayed = i + 1;
+  }
+
+  // —— 交付检查（基于全部步骤合法回放后的末态）——
+  const info = pageSequence(state);
+
+  // 阅读槽位展开：每个面片的上/下面各出现一次（各叠各自的封面→封底序列）
+  const slots = [];
+  for (const grp of info.stacks) {
+    const n = grp.leaves.length;
+    const push = (slot, leaf, part) => {
+      const p = state.panels[leaf.panelId];
+      const faceInfo = part === 'upper' ? leaf.upper : leaf.lower;
+      slots.push({
+        stack: grp.cell,
+        slot,
+        cell: key(p.ox, p.oy),
+        face: faceInfo.face,
+        label: faceInfo.label,
+        upright: !!faceInfo.upright
+      });
+    };
+    grp.leaves.forEach((leaf, i) => push(i, leaf, 'upper'));
+    for (let i = n - 1; i >= 0; i--) push(2 * n - 1 - i, grp.leaves[i], 'lower');
+  }
+  const locView = (s) => ({ cell: s.cell, face: s.face, slot: s.slot, stack: s.stack, label: s.label });
+  const faceName = (f) => (f === 'front' ? '正面' : '反面');
+
+  // 分离叠层：无法确定唯一阅读顺序，不能按单帖交付
+  if (!info.folded) {
+    findings.push({
+      code: 'separated_stacks',
+      severity: 'error',
+      stacks: info.stacks.map((g) => ({ cell: g.cell, depth: g.depth })),
+      message: `折叠后仍有 ${info.stacks.length} 个分离叠层（` +
+        info.stacks.map((g) => `格(${g.cell})×${g.depth} 片`).join('、') +
+        '），无法确定唯一阅读顺序，不能按单帖交付。'
+    });
+  }
+
+  // 重复页码：同一非空页码出现在多个面上，每个重复页码一条
+  const byLabel = new Map();
+  for (const s of slots) {
+    if (s.label == null) continue;
+    if (!byLabel.has(s.label)) byLabel.set(s.label, []);
+    byLabel.get(s.label).push(s);
+  }
+  for (const [label, list] of byLabel) {
+    if (list.length < 2) continue;
+    findings.push({
+      code: 'duplicate_page',
+      severity: 'error',
+      page: label,
+      locations: list.map(locView),
+      message: `页码“${label}”重复出现 ${list.length} 次（` +
+        list.map((s) => `格(${s.cell})${faceName(s.face)}`).join('、') +
+        '），交付前必须去重。'
+    });
+  }
+
+  // 空白页码槽位
+  const blanks = slots.filter((s) => s.label == null);
+  if (blanks.length) {
+    findings.push({
+      code: 'blank_page',
+      severity: 'warning',
+      locations: blanks.map(locView),
+      message: `阅读序列中存在 ${blanks.length} 个空白页码槽位；若非故意留白，请在交付前补齐页码。`
+    });
+  }
+
+  // 倒置页码
+  const inverted = slots.filter((s) => !s.upright);
+  if (inverted.length) {
+    findings.push({
+      code: 'inverted_page',
+      severity: 'warning',
+      locations: inverted.map(locView),
+      message: `${inverted.length} 个页码在折后倒置 180°；交付前请确认制版已做倒置补偿` +
+        '（见“双面印刷版预览”的旋转标记）。'
+    });
+  }
+
+  // 未覆盖纸格：正、反面均未标注页码的原始纸格
+  const uncovered = [];
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const p = state.panels[key(x, y)];
+      if (p.front === '' && p.back === '') uncovered.push(key(x, y));
+    }
+  }
+  if (uncovered.length) {
+    findings.push({
+      code: 'uncovered_cell',
+      severity: 'warning',
+      cells: uncovered,
+      message: `${uncovered.length} 个原始纸格正、反面均未标注页码（未被拼版覆盖）；` +
+        '若属纸格浪费请调整网格或补齐页码。'
+    });
+  }
+
+  // 折叠后容量异常：数字页码超出折帖容量 1..capacity（非数字页码不参与本项）
+  const outOfCap = slots.filter((s) => {
+    if (s.label == null || !/^-?\d+$/.test(s.label)) return false;
+    const n = Number(s.label);
+    return n < 1 || n > capacity;
+  });
+  if (outOfCap.length) {
+    findings.push({
+      code: 'page_out_of_capacity',
+      severity: 'error',
+      capacity,
+      locations: outOfCap.map(locView),
+      message: `${outOfCap.length} 个页码超出折帖容量：本帖共 ${capacity} 个页面槽位，` +
+        `合法页码范围为 1–${capacity}。`
+    });
+  }
+
+  return finish(false, replayed);
+}
+
 /** 方案校验/规整（载入 JSON 时使用） */
 function normalizePlan(plan) {
   const errors = [];
@@ -911,7 +1115,7 @@ const api = {
   impositionEligibility, autoImpose, impositionOverwrite,
   duplexEligibility, buildDuplexPlates,
   findFoldPath, candidateSteps, stateKey, describeStep,
-  trackPanel
+  trackPanel, auditPlan
 };
 
 if (typeof module !== 'undefined' && module.exports) module.exports = api;

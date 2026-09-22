@@ -352,3 +352,90 @@ test('POST /api/trajectory：目标非法返回 ok:false；方案非法返回 40
   assert.equal(badPlan.status, 400);
   assert.equal(badPlan.json.error.code, 'bad_plan');
 });
+
+// ---------- 生产质量审计 ----------
+const AUDIT_LABELS = {
+  '0,0': { front: '4', back: '5' }, '1,0': { front: '6', back: '3' },
+  '0,1': { front: '8', back: '1' }, '1,1': { front: '7', back: '2' }
+};
+
+test('POST /api/audit：干净折帖返回可发布结论（仅倒置警告），且只读不落盘', async () => {
+  const before = await (await fetch(`${base}/api/plans`)).json();
+  const r = await post('/api/audit', { rows: 2, cols: 2, labels: AUDIT_LABELS, steps: STEPS });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.aborted, false);
+  assert.equal(r.json.replayedSteps, 2);
+  assert.deepEqual(r.json.plan, { rows: 2, cols: 2, steps: 2, capacity: 8 });
+  assert.deepEqual(r.json.findings.map((f) => f.code), ['inverted_page']);
+  assert.equal(r.json.findings[0].severity, 'warning');
+  assert.equal(r.json.summary.verdict, 'publishable');
+  assert.equal(r.json.summary.errors, 0);
+  // 只读：审计不在服务器落盘任何方案
+  const after = await (await fetch(`${base}/api/plans`)).json();
+  assert.deepEqual(after, before);
+});
+
+test('POST /api/audit：重复页码 / 容量异常 / 分离叠层按错误汇总为需修订', async () => {
+  const r = await post('/api/audit', {
+    rows: 1, cols: 2,
+    labels: { '0,0': { front: '1', back: '9' }, '1,0': { front: '9', back: '3' } },
+    steps: [{ axis: 'v', line: 1, dir: 'r' }]
+  });
+  const list = r.json.findings.map((f) => f.code);
+  assert.ok(list.includes('duplicate_page'));
+  assert.ok(list.includes('page_out_of_capacity'));
+  const dup = r.json.findings.find((f) => f.code === 'duplicate_page');
+  assert.equal(dup.page, '9');
+  assert.deepEqual(dup.locations.map((l) => l.cell).sort(), ['0,0', '1,0']);
+  assert.equal(r.json.summary.verdict, 'needs_revision');
+  assert.ok(r.json.summary.errors >= 2);
+
+  const sep = await post('/api/audit', {
+    rows: 2, cols: 3, labels: {},
+    steps: [{ axis: 'v', line: 1, dir: 'r' }]
+  });
+  const stacks = sep.json.findings.find((f) => f.code === 'separated_stacks');
+  assert.ok(stacks);
+  assert.equal(stacks.severity, 'error');
+  assert.equal(stacks.stacks.length, 4);
+  assert.equal(sep.json.summary.verdict, 'needs_revision');
+});
+
+test('POST /api/audit：空白页码与未覆盖纸格为警告，结论仍可发布', async () => {
+  const r = await post('/api/audit', { rows: 2, cols: 2, labels: {}, steps: STEPS });
+  const list = r.json.findings.map((f) => f.code);
+  assert.ok(list.includes('blank_page'));
+  assert.ok(list.includes('uncovered_cell'));
+  assert.ok(r.json.findings.every((f) => f.severity === 'warning'));
+  assert.equal(r.json.summary.verdict, 'publishable');
+});
+
+test('POST /api/audit：首个非法步骤即中止，不伪造后续结论', async () => {
+  const r = await post('/api/audit', {
+    rows: 1, cols: 3, labels: {},
+    steps: [
+      { axis: 'v', line: 1, dir: 'r' },
+      { axis: 'v', line: 2, dir: 'l' }
+    ]
+  });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.ok, true);
+  assert.equal(r.json.aborted, true);
+  assert.equal(r.json.replayedSteps, 1);
+  assert.equal(r.json.findings.length, 1);
+  const f = r.json.findings[0];
+  assert.equal(f.code, 'invalid_step');
+  assert.equal(f.severity, 'error');
+  assert.equal(f.stepIndex, 1);
+  assert.equal(f.foldCode, 'thickness');
+  assert.deepEqual(f.conflicts, ['2,0', '1,0']);
+  assert.equal(r.json.summary.verdict, 'needs_revision');
+});
+
+test('POST /api/audit：非法方案返回 400 bad_plan', async () => {
+  const r = await post('/api/audit', { rows: 2, cols: 2, steps: [{ axis: 'z' }] });
+  assert.equal(r.status, 400);
+  assert.equal(r.json.ok, false);
+  assert.equal(r.json.error.code, 'bad_plan');
+});

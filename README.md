@@ -114,6 +114,17 @@ docker compose down
 10. **保存 / 载入**：
    - “保存到服务器”将方案 JSON 存入容器数据卷，可通过“已存方案…”再次载入；
    - “导出 JSON / 导入 JSON”在本地文件与应用之间交换方案。
+11. **生产质量审计**：右侧“生产质量审计”卡片对当前方案**完整重放**后，
+    按印刷交付规则自动检查（只读，不改动方案；方案变动后即时重算）：
+    - 检查项与严重级别：**非法步骤 / 分离叠层 / 重复页码 / 容量异常**为“错误”，
+      **空白页码 / 倒置页码 / 未覆盖纸格**为“警告”；
+    - 每条结果给出严重级别徽标、可读说明与定位标签
+      （原始纸格·面·槽位、叠层格位或步骤号与冲突纸格）；
+    - 存在**非法折叠步骤**时只报告**首个错误**并中止审计，
+      不对其后状态伪造任何交付结论；
+    - 卡片顶部汇总 **可发布 / 需修订** 结论：任一“错误”即需修订，
+      仅有警告时可发布但需人工确认；
+    - “**导出 JSON 报告**”下载含方案快照与全部审计结果的 JSON 文件。
 
 ### 方案 JSON 格式
 
@@ -154,19 +165,20 @@ docker compose down
 ## 目录结构
 
 ```
-server.js              Express 服务：静态托管 + /api/simulate + /api/impose + /api/duplex-plate + /api/find-path + /api/trajectory + 方案持久化
+server.js              Express 服务：静态托管 + /api/simulate + /api/audit + /api/impose + /api/duplex-plate + /api/find-path + /api/trajectory + 方案持久化
 entrypoint.sh          容器启动入口（依赖自检/安装、初始化、启动）
 public/
   index.html           页面结构
-  styles.css           样式（含面片轨迹时间线与双面版打印样式 @media print）
-  foldEngine.js        折叠模拟引擎（浏览器与服务端共用，含面片轨迹 trackPanel）
-  app.js               Canvas 渲染、交互、回放、面片轨迹、存取、双面印刷版预览
+  styles.css           样式（含面片轨迹时间线、审计卡片与双面版打印样式 @media print）
+  foldEngine.js        折叠模拟引擎（浏览器与服务端共用，含面片轨迹 trackPanel 与生产质量审计 auditPlan）
+  app.js               Canvas 渲染、交互、回放、面片轨迹、存取、双面印刷版预览、生产质量审计卡片
 tests/engine.test.js   引擎单元测试（node --test）
 tests/imposition.test.js 自动拼版单元测试
 tests/duplex.test.js   双面印刷版（镜像、制版旋转、前置条件）单元测试
 tests/pathfind.test.js 折手自动寻路（BFS、状态键、无解/超限）单元测试
 tests/trajectory.test.js 面片轨迹（身份追踪、层序/朝向、非法步中断、参数校验）单元测试
-tests/api.test.js      /api/impose、/api/find-path、/api/trajectory、/api/simulate 与方案存取的 HTTP 测试
+tests/audit.test.js    生产质量审计（交付规则、严重级别、结论汇总、非法步中止）单元测试
+tests/api.test.js      /api/audit、/api/impose、/api/find-path、/api/trajectory、/api/simulate 与方案存取的 HTTP 测试
 tests/ui-smoke.js      前端主流程冒烟（DOM 桩中加载 app.js，直接 `node tests/ui-smoke.js` 运行）
 Dockerfile, docker-compose.yml
 ```
@@ -174,7 +186,7 @@ Dockerfile, docker-compose.yml
 ## 运行测试
 
 ```bash
-npm test                 # node --test：引擎 / 拼版 / 寻路 / 轨迹 / HTTP 测试
+npm test                 # node --test：引擎 / 拼版 / 寻路 / 轨迹 / 审计 / HTTP 测试
 node tests/ui-smoke.js   # 前端主流程冒烟（DOM 桩，独立运行）
 ```
 
@@ -232,3 +244,45 @@ node tests/ui-smoke.js   # 前端主流程冒烟（DOM 桩，独立运行）
 `interrupted:{stepIndex,code,message,conflicts}` 标明中断原因（`contour` / `thickness`）。
 目标原格越界或面别非法返回 `ok:false`，错误码 `bad_target`；网格非法为 `bad_grid`；
 方案 JSON 非法为 `bad_plan`（HTTP 400）。该接口只读，不改变保存 / 导入格式。
+
+`POST /api/audit`（只读，不改动任何数据）body 同方案 JSON，对当前方案**完整重放**后
+按印刷交付规则输出生产质量审计报告：
+
+```json
+{
+  "ok": true,
+  "plan": { "rows": 2, "cols": 2, "steps": 2, "capacity": 8 },
+  "replayedSteps": 2,
+  "aborted": false,
+  "findings": [
+    {
+      "code": "inverted_page",
+      "severity": "warning",
+      "message": "4 个页码在折后倒置 180°；…",
+      "locations": [
+        { "cell": "0,0", "face": "front", "slot": 1, "stack": "1,1", "label": "4" }
+      ]
+    }
+  ],
+  "summary": { "errors": 0, "warnings": 1, "verdict": "publishable", "message": "…" }
+}
+```
+
+检查项（`findings[].code`）与严重级别（`severity`）：
+
+| code | 级别 | 含义与定位字段 |
+| --- | --- | --- |
+| `invalid_step` | error | 首个非法折叠步骤：`stepIndex` / `step` / `foldCode` / `conflicts`；审计中止（`aborted:true`），不伪造后续结论 |
+| `separated_stacks` | error | 末态仍是多个分离叠层：`stacks`（各叠格位与厚度） |
+| `duplicate_page` | error | 同一非空页码出现在多个面上：`page` + `locations`（每个重复页码一条） |
+| `page_out_of_capacity` | error | 数字页码超出折帖容量 1..`capacity`：`capacity` + `locations` |
+| `blank_page` | warning | 阅读序列中的空白页码槽位：`locations` |
+| `inverted_page` | warning | 页码折后倒置 180°：`locations` |
+| `uncovered_cell` | warning | 正反面均未标注页码的原始纸格：`cells` |
+
+`locations` 中 `cell` 为原始纸格（`列,行`，0 基）、`face` 为面别、
+`stack` 为所在叠层格位、`slot` 为该叠封面→封底阅读序列的 0 基槽位。
+`summary.verdict`：存在任一 `error` 级结果为 `needs_revision`（需修订），
+否则为 `publishable`（可发布，可能带警告）。
+方案 JSON 非法返回 400 `bad_plan`；网格非法返回 `ok:false, code:"bad_grid"`。
+界面“生产质量审计”卡片展示同一报告，并可导出含方案快照的 JSON 文件。

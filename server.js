@@ -3,6 +3,7 @@
  * server.js —— 折页阅读顺序校样 Web 服务
  *  - 静态托管 public/（原生 HTML/CSS/Canvas 前端）
  *  - /api/simulate：服务端重放方案（与浏览器共用同一份 foldEngine.js）
+ *  - /api/audit：生产质量审计（只读：完整重放 + 交付规则检查，不落盘）
  *  - /api/plans* ：方案 JSON 持久化到 DATA_DIR（容器卷）
  */
 const express = require('express');
@@ -163,6 +164,20 @@ app.post('/api/trajectory', (req, res) => {
       return res.json({ ok: false, error: { code: result.code, message: result.message } });
     }
     res.json(result);
+  } catch (e) {
+    res.status(400).json({ ok: false, error: { code: 'bad_plan', message: e.message } });
+  }
+});
+
+// ---------- 生产质量审计（只读，不改动任何数据） ----------
+app.post('/api/audit', (req, res) => {
+  try {
+    const plan = E.normalizePlan(req.body || {});
+    const report = E.auditPlan(plan.rows, plan.cols, plan.labels, plan.steps);
+    if (!report.ok) {
+      return res.json({ ok: false, error: { code: report.code, message: report.message } });
+    }
+    res.json(report);
   } catch (e) {
     res.status(400).json({ ok: false, error: { code: 'bad_plan', message: e.message } });
   }

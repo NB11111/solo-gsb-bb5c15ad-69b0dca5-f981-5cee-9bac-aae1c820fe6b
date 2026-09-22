@@ -427,6 +427,47 @@ button.fold { flex: 1 1 40%; min-width: 110px; font-weight: 600; }
   border-color: #1f7a45;
 }
 
+/* ---------- 生产质量审计 ---------- */
+.audit-ok { color: var(--ok); }
+.audit-err { color: var(--danger); }
+.audit-findings {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 320px;
+  overflow: auto;
+}
+.audit-finding {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 7px 9px;
+  font-size: 12px;
+  line-height: 1.55;
+  background: #f8faff;
+}
+.audit-finding.error { background: var(--warn-bg); border-color: var(--warn-border); }
+.audit-finding.warning { background: #fff7e6; border-color: #e8cf94; }
+.audit-finding.ok { background: #e3f6ec; border-color: #b7e4c7; color: var(--ok); }
+.audit-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.audit-sev { padding: 1px 8px; border-radius: 12px; font-size: 11px; font-weight: 700; color: #fff; }
+.audit-sev.error { background: var(--danger); }
+.audit-sev.warning { background: #e8a13c; }
+.audit-code { font-weight: 700; color: #102a5c; }
+.audit-msg { color: var(--ink); }
+.audit-locs { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px; }
+.audit-loc {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 @media (max-width: 1100px) {
   .layout { grid-template-columns: 1fr; }
 }

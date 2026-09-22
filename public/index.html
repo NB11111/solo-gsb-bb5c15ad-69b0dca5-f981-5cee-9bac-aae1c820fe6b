@@ -141,6 +141,19 @@
         <div id="foldState" class="hint"></div>
       </section>
 
+      <section class="card" id="auditCard">
+        <h2>生产质量审计</h2>
+        <p class="hint">对当前方案<b>完整重放</b>后按印刷交付规则检查：空白/重复页码、
+          分离叠层、倒置页码、未覆盖纸格与折叠后容量。存在非法步骤时只报告首个错误并中止。
+          审计只读、不改动方案；方案变动后即时重算。</p>
+        <div class="row">
+          <button id="auditExportBtn" disabled>导出 JSON 报告</button>
+          <span id="auditSummary" class="hint"></span>
+        </div>
+        <div id="auditStatus" class="hint"></div>
+        <ul id="auditFindings" class="audit-findings" hidden></ul>
+      </section>
+
       <section class="card" id="duplexCard">
         <h2>双面印刷版预览</h2>
         <p class="hint">全部折叠合法并收成单叠后，按当前纸格标注并排生成<b>正面版 / 背面版</b>：
